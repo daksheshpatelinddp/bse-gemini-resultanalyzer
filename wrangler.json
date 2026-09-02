@@ -1,0 +1,24 @@
+{
+  "name": "bse-rss-reader",
+  "main": "worker.js",
+  "compatibility_date": "2026-08-24",
+
+  "triggers": {
+    "crons": [
+      "30-59/1 1 * * *",
+      "* 2-16 * * *",
+      "0-30/1,45/15 17 * * *"
+    ]
+  },
+
+  "kv_namespaces": [
+    {
+      "binding": "BSE_DATA",
+      "id": "96f86f84897c4005be78d85a4636b803"
+    }
+  ],
+
+  "observability": {
+    "enabled": true
+  }
+}
