@@ -1,7 +1,11 @@
 /*
- * BSE GEMINI RESULT ANALYZER
+ * BSE GEMINI RESULT ANALYZER (BACKEND)
+ * Repository: bse-gemini-resultanalyzer
  *
- * Requirements in Cloudflare Worker Secrets:
+ * KV Binding Required in wrangler.toml:
+ *   - BSE_GEMINI_DATA (ID: 6c86cb7981334c8ba2b1ed48d73e3d2a)
+ *
+ * Required Cloudflare Worker Secrets (Add via Dashboard):
  *   - TELEGRAM_BOT_TOKEN
  *   - TELEGRAM_CHAT_ID
  *   - NTFY_TOPIC
@@ -34,7 +38,6 @@ async function analyzeFinancialPdf(pdfUrl, env) {
   }
 
   try {
-    // Download PDF binary stream directly into memory
     const pdfResponse = await fetch(pdfUrl, {
       headers: {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
@@ -45,7 +48,6 @@ async function analyzeFinancialPdf(pdfUrl, env) {
 
     const arrayBuffer = await pdfResponse.arrayBuffer();
     
-    // Convert binary stream to base64 encoding for API transport
     let binary = "";
     const bytes = new Uint8Array(arrayBuffer);
     const len = bytes.byteLength;
@@ -54,7 +56,6 @@ async function analyzeFinancialPdf(pdfUrl, env) {
     }
     const base64Pdf = btoa(binary);
 
-    // Endpoint for Gemini 1.5 Flash API
     const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${env.GEMINI_API_KEY}`;
     
     const prompt = `Analyze this BSE financial result PDF attachment. Extract and provide a clear, concise bullet-point summary in simple text format containing:
@@ -155,14 +156,14 @@ async function sendTelegramAlert(title, body, scrip, link, fetchedAt, aiSummary,
   const cleanBody = escapeTelegramHtml(body);
   const formattedFetchTime = fetchedAt ? new Date(fetchedAt).toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata' }) : "N/A";
 
-  let messageText = `🚨 <b>${cleanTitle}</b>\n\n${cleanBody}\n\n⚡ <b>Fetched:</b> ${formattedFetchTime}`;
+  let messageText = ` <b>${cleanTitle}</b>\n\n${cleanBody}\n\n <b>Fetched:</b> ${formattedFetchTime}`;
 
   if (aiSummary) {
     const cleanAiSummary = escapeTelegramHtml(aiSummary);
-    messageText += `\n\n🤖 <b>AI Financial Analysis:</b>\n${cleanAiSummary}`;
+    messageText += `\n\n <b>AI Financial Analysis:</b>\n${cleanAiSummary}`;
   }
 
-  messageText += `\n\n🔗 <a href="${targetLink}">View PDF / Filing Details</a>`;
+  messageText += `\n\n <a href="${targetLink}">View PDF / Filing Details</a>`;
 
   try {
     const url = `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`;
@@ -366,68 +367,68 @@ function parseCorporateAnnouncements(xml, fetchedAt) {
 }
 
 /* ============================================================
-   KV STORAGE OPERATIONS
+   KV STORAGE OPERATIONS (Updated for BSE_GEMINI_DATA)
    ============================================================ */
 
 async function getWatchlist(env) {
-  if (!env.BSE_DATA) return [];
-  const data = await env.BSE_DATA.get("watchlist", "json");
+  if (!env.BSE_GEMINI_DATA) return [];
+  const data = await env.BSE_GEMINI_DATA.get("watchlist", "json");
   return Array.isArray(data) ? data : [];
 }
 
 async function setWatchlist(env, watchlist) {
-  if (!env.BSE_DATA) throw new Error("BSE_DATA KV is not bound.");
-  await env.BSE_DATA.put("watchlist", JSON.stringify(watchlist));
+  if (!env.BSE_GEMINI_DATA) throw new Error("BSE_GEMINI_DATA KV is not bound.");
+  await env.BSE_GEMINI_DATA.put("watchlist", JSON.stringify(watchlist));
 }
 
 async function getNotificationSettings(env) {
-  if (!env.BSE_DATA) return { telegram: true, ntfy: true };
-  const data = await env.BSE_DATA.get("notificationSettings", "json");
+  if (!env.BSE_GEMINI_DATA) return { telegram: true, ntfy: true };
+  const data = await env.BSE_GEMINI_DATA.get("notificationSettings", "json");
   return data || { telegram: true, ntfy: true };
 }
 
 async function setNotificationSettings(env, settings) {
-  if (!env.BSE_DATA) throw new Error("BSE_DATA KV is not bound.");
-  await env.BSE_DATA.put("notificationSettings", JSON.stringify(settings));
+  if (!env.BSE_GEMINI_DATA) throw new Error("BSE_GEMINI_DATA KV is not bound.");
+  await env.BSE_GEMINI_DATA.put("notificationSettings", JSON.stringify(settings));
 }
 
 async function getSeen(env) {
-  if (!env.BSE_DATA) return [];
-  const data = await env.BSE_DATA.get("announcementSeen", "json");
+  if (!env.BSE_GEMINI_DATA) return [];
+  const data = await env.BSE_GEMINI_DATA.get("announcementSeen", "json");
   return Array.isArray(data) ? data : [];
 }
 
 async function saveSeen(env, ids) {
-  if (!env.BSE_DATA) return;
-  await env.BSE_DATA.put("announcementSeen", JSON.stringify(ids.slice(0, MAX_SEEN)));
+  if (!env.BSE_GEMINI_DATA) return;
+  await env.BSE_GEMINI_DATA.put("announcementSeen", JSON.stringify(ids.slice(0, MAX_SEEN)));
 }
 
 async function getAlerts(env) {
-  if (!env.BSE_DATA) return [];
-  const data = await env.BSE_DATA.get("specialAlerts", "json");
+  if (!env.BSE_GEMINI_DATA) return [];
+  const data = await env.BSE_GEMINI_DATA.get("specialAlerts", "json");
   return Array.isArray(data) ? data : [];
 }
 
 async function saveAlerts(env, alerts) {
-  if (!env.BSE_DATA) return;
-  await env.BSE_DATA.put("specialAlerts", JSON.stringify(alerts.slice(0, MAX_ALERTS)));
+  if (!env.BSE_GEMINI_DATA) return;
+  await env.BSE_GEMINI_DATA.put("specialAlerts", JSON.stringify(alerts.slice(0, MAX_ALERTS)));
 }
 
 async function getTimestampMap(env) {
-  if (!env.BSE_DATA) return {};
-  const data = await env.BSE_DATA.get("announcementTimestamps", "json");
+  if (!env.BSE_GEMINI_DATA) return {};
+  const data = await env.BSE_GEMINI_DATA.get("announcementTimestamps", "json");
   return data || {};
 }
 
 async function saveTimestampMap(env, map) {
-  if (!env.BSE_DATA) return;
+  if (!env.BSE_GEMINI_DATA) return;
   const keys = Object.keys(map);
   if (keys.length > 5000) {
     const trimmedMap = {};
     keys.slice(keys.length - 5000).forEach(k => { trimmedMap[k] = map[k]; });
-    await env.BSE_DATA.put("announcementTimestamps", JSON.stringify(trimmedMap));
+    await env.BSE_GEMINI_DATA.put("announcementTimestamps", JSON.stringify(trimmedMap));
   } else {
-    await env.BSE_DATA.put("announcementTimestamps", JSON.stringify(map));
+    await env.BSE_GEMINI_DATA.put("announcementTimestamps", JSON.stringify(map));
   }
 }
 
@@ -508,9 +509,8 @@ async function monitorFeeds(env) {
     const isWhitelisted = matchesWatchlist(item, watchlist);
     const hasPdf = item.link && item.link.toLowerCase().includes(".pdf");
     
-    // Evaluate if text indicates actual financial result vs irrelevant filing
     const fullText = `${item.title || ""} ${item.description || ""}`.toLowerCase();
-    
+
     const isFinancialTableKeywords = 
       fullText.includes("financial results") || 
       fullText.includes("financial result") || 
@@ -528,7 +528,6 @@ async function monitorFeeds(env) {
 
     const isActualFinancialTable = item.isFinancialResult && isFinancialTableKeywords && !isNonResultNoiseKeywords;
 
-    // Trigger on any market-wide result PDF OR any whitelisted company announcement
     if (isActualFinancialTable || isWhitelisted) {
       if (!alerts.some(a => a.id === item.id)) {
         
@@ -538,7 +537,6 @@ async function monitorFeeds(env) {
           aiSummary = await analyzeFinancialPdf(item.link, env);
         }
 
-        // Send Telegram alert
         if (settings.telegram !== false) {
           await sendTelegramAlert(
             `${item.company || "BSE Announcement"} (${item.scrip || ""})`,
@@ -551,7 +549,6 @@ async function monitorFeeds(env) {
           );
         }
 
-        // Send ntfy alert
         if (settings.ntfy !== false) {
           await sendNtfyAlert(
             `${item.company || "BSE Announcement"} (${item.scrip || ""})`,
