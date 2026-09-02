@@ -1,13 +1,11 @@
 /*
- * BSE RSS READER
- * V4 - Improved BSE Corporate Announcement Categories
- *       + Watchlist Alerts / Special Bundle + Push Notifications via Telegram Bot & ntfy
+ * BSE GEMINI RESULT ANALYZER
  *
- * KV binding: BSE_DATA
- * Secrets required in Cloudflare Worker:
+ * Requirements in Cloudflare Worker Secrets:
  *   - TELEGRAM_BOT_TOKEN
  *   - TELEGRAM_CHAT_ID
  *   - NTFY_TOPIC
+ *   - GEMINI_API_KEY
  */
 
 const FINANCIAL_RESULTS_URL =
@@ -24,6 +22,84 @@ const CORS_HEADERS = {
   "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
   "Access-Control-Allow-Headers": "Content-Type",
 };
+
+/* ============================================================
+   GEMINI AI ANALYSIS HELPER
+   ============================================================ */
+
+async function analyzeFinancialPdf(pdfUrl, env) {
+  if (!env.GEMINI_API_KEY) {
+    console.error("GEMINI_API_KEY is missing in environment variables.");
+    return null;
+  }
+
+  try {
+    // Download PDF binary stream directly into memory
+    const pdfResponse = await fetch(pdfUrl, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+      },
+    });
+
+    if (!pdfResponse.ok) return null;
+
+    const arrayBuffer = await pdfResponse.arrayBuffer();
+    
+    // Convert binary stream to base64 encoding for API transport
+    let binary = "";
+    const bytes = new Uint8Array(arrayBuffer);
+    const len = bytes.byteLength;
+    for (let i = 0; i < len; i++) {
+      binary += String.fromCharCode(bytes[i]);
+    }
+    const base64Pdf = btoa(binary);
+
+    // Endpoint for Gemini 1.5 Flash API
+    const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${env.GEMINI_API_KEY}`;
+    
+    const prompt = `Analyze this BSE financial result PDF attachment. Extract and provide a clear, concise bullet-point summary in simple text format containing:
+- Period (e.g. Standalone / Consolidated)
+- Total Revenue from Operations (YoY & QoQ % change if mentioned)
+- Net Profit / Loss after Tax (YoY & QoQ % change if mentioned)
+- Operating Profit / EBITDA & Margins
+- Key Highlights / Exceptional items (if any, max 3 bullet points)
+
+Keep the output under 180 words, perfectly readable on mobile screens. Do not use Markdown tables or code blocks.`;
+
+    const requestBody = {
+      contents: [
+        {
+          parts: [
+            { text: prompt },
+            {
+              inline_data: {
+                mime_type: "application/pdf",
+                data: base64Pdf,
+              },
+            },
+          ],
+        },
+      ],
+    };
+
+    const aiRes = await fetch(geminiUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(requestBody),
+    });
+
+    if (!aiRes.ok) {
+      console.error("Gemini API HTTP Error:", aiRes.status);
+      return null;
+    }
+
+    const resultData = await aiRes.json();
+    return resultData?.candidates?.[0]?.content?.parts?.[0]?.text || null;
+  } catch (err) {
+    console.error("Error performing PDF analysis:", err);
+    return null;
+  }
+}
 
 /* ============================================================
    HELPERS & UTILS
@@ -67,11 +143,8 @@ function escapeTelegramHtml(text) {
     .replace(/>/g, "&gt;");
 }
 
-async function sendTelegramAlert(title, body, scrip, link, fetchedAt, env) {
-  if (!env.TELEGRAM_BOT_TOKEN || !env.TELEGRAM_CHAT_ID) {
-    console.error("Telegram credentials missing in Worker environment variables.");
-    return;
-  }
+async function sendTelegramAlert(title, body, scrip, link, fetchedAt, aiSummary, env) {
+  if (!env.TELEGRAM_BOT_TOKEN || !env.TELEGRAM_CHAT_ID) return;
 
   var pdfLink = normalizeBseLink(link);
   var targetLink = (pdfLink && pdfLink !== "https://www.bseindia.com")
@@ -82,7 +155,14 @@ async function sendTelegramAlert(title, body, scrip, link, fetchedAt, env) {
   const cleanBody = escapeTelegramHtml(body);
   const formattedFetchTime = fetchedAt ? new Date(fetchedAt).toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata' }) : "N/A";
 
-  const messageText = `🚨 <b>${cleanTitle}</b>\n\n${cleanBody}\n\n⚡ <b>Fetched:</b> ${formattedFetchTime}\n🔗 <a href="${targetLink}">View Attachment / Details</a>`;
+  let messageText = `🚨 <b>${cleanTitle}</b>\n\n${cleanBody}\n\n⚡ <b>Fetched:</b> ${formattedFetchTime}`;
+
+  if (aiSummary) {
+    const cleanAiSummary = escapeTelegramHtml(aiSummary);
+    messageText += `\n\n🤖 <b>AI Financial Analysis:</b>\n${cleanAiSummary}`;
+  }
+
+  messageText += `\n\n🔗 <a href="${targetLink}">View PDF / Filing Details</a>`;
 
   try {
     const url = `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`;
@@ -102,10 +182,7 @@ async function sendTelegramAlert(title, body, scrip, link, fetchedAt, env) {
 }
 
 async function sendNtfyAlert(title, body, scrip, link, fetchedAt, env) {
-  if (!env.NTFY_TOPIC) {
-    console.error("NTFY_TOPIC missing in Worker environment variables.");
-    return;
-  }
+  if (!env.NTFY_TOPIC) return;
 
   var pdfLink = normalizeBseLink(link);
   var targetLink = (pdfLink && pdfLink !== "https://www.bseindia.com")
@@ -159,64 +236,27 @@ async function fetchXML(url) {
   const response = await fetch(url, {
     method: "GET",
     headers: {
-      "User-Agent": "Mozilla/5.0 (compatible; BSE-RSS-Reader/4.0)",
+      "User-Agent": "Mozilla/5.0 (compatible; BSE-RSS-Reader/5.0)",
       Accept: "application/rss+xml, application/xml, text/xml, */*",
       "Cache-Control": "no-cache",
     },
     cf: { cacheTtl: 0, cacheEverything: false },
   });
 
-  if (!response.ok) {
-    throw new Error(`BSE feed HTTP ${response.status}`);
-  }
+  if (!response.ok) throw new Error(`BSE feed HTTP ${response.status}`);
   return await response.text();
 }
 
-/* ============================================================
-   CLASSIFICATION RULES
-   ============================================================ */
-
 const CATEGORY_RULES = [
-  {
-    name: "Financial Results",
-    words: [
-      "financial results", "financial result", "unaudited financial results",
-      "audited financial results", "quarterly results", "quarterly result",
-      "results for the quarter", "standalone financial results", "consolidated financial results"
-    ],
-  },
-  {
-    name: "Board Meeting",
-    words: ["board meeting", "meeting of the board", "outcome of board meeting"],
-  },
-  {
-    name: "Dividend",
-    words: ["dividend", "interim dividend", "final dividend", "special dividend"],
-  },
-  {
-    name: "Bonus",
-    words: ["bonus issue", "bonus shares", "issue of bonus shares"],
-  },
-  {
-    name: "Fund Raising",
-    words: ["fund raising", "fundraising", "qip", "private placement", "preferential issue"],
-  },
-  {
-    name: "Acquisition",
-    words: ["acquisition", "acquire", "acquired", "takeover"],
-  },
-  {
-    name: "Order / Contract",
-    words: ["order received", "order win", "work order", "contract awarded"],
-  },
-  {
-    name: "Credit Rating",
-    words: ["credit rating", "rating reaffirmed", "rating upgrade", "rating downgrade"],
-  },
-  {
-    name: "Appointment / Resignation",
-    words: ["appointment", "resignation", "cessation", "change in management"],
-  }
+  { name: "Financial Results", words: ["financial results", "financial result", "unaudited financial results", "audited financial results", "quarterly results", "quarterly result", "results for the quarter", "standalone financial results", "consolidated financial results"] },
+  { name: "Board Meeting", words: ["board meeting", "meeting of the board", "outcome of board meeting"] },
+  { name: "Dividend", words: ["dividend", "interim dividend", "final dividend", "special dividend"] },
+  { name: "Bonus", words: ["bonus issue", "bonus shares", "issue of bonus shares"] },
+  { name: "Fund Raising", words: ["fund raising", "fundraising", "qip", "private placement", "preferential issue"] },
+  { name: "Acquisition", words: ["acquisition", "acquire", "acquired", "takeover"] },
+  { name: "Order / Contract", words: ["order received", "order win", "work order", "contract awarded"] },
+  { name: "Credit Rating", words: ["credit rating", "rating reaffirmed", "rating upgrade", "rating downgrade"] },
+  { name: "Appointment / Resignation", words: ["appointment", "resignation", "cessation", "change in management"] }
 ];
 
 function classifyAnnouncement(title, description) {
@@ -224,20 +264,13 @@ function classifyAnnouncement(title, description) {
   const categories = [];
 
   for (const rule of CATEGORY_RULES) {
-    if (rule.words.some(word => text.includes(word))) {
-      categories.push(rule.name);
-    }
+    if (rule.words.some(word => text.includes(word))) categories.push(rule.name);
   }
 
   if (categories.length === 0) categories.push("Other");
   const isFinancialResult = categories.includes("Financial Results");
-
   return { category: categories[0], categories, isFinancialResult };
 }
-
-/* ============================================================
-   PARSERS
-   ============================================================ */
 
 function parseFinancialResults(xml, fetchedAt) {
   const items = [];
@@ -279,7 +312,6 @@ function parseFinancialResults(xml, fetchedAt) {
       id: stableId,
     });
   }
-
   return items;
 }
 
@@ -330,7 +362,6 @@ function parseCorporateAnnouncements(xml, fetchedAt) {
       id: stableId,
     });
   }
-
   return items;
 }
 
@@ -393,9 +424,7 @@ async function saveTimestampMap(env, map) {
   const keys = Object.keys(map);
   if (keys.length > 5000) {
     const trimmedMap = {};
-    keys.slice(keys.length - 5000).forEach(k => {
-      trimmedMap[k] = map[k];
-    });
+    keys.slice(keys.length - 5000).forEach(k => { trimmedMap[k] = map[k]; });
     await env.BSE_DATA.put("announcementTimestamps", JSON.stringify(trimmedMap));
   } else {
     await env.BSE_DATA.put("announcementTimestamps", JSON.stringify(map));
@@ -417,16 +446,9 @@ async function attachPersistentTimestamps(items, env) {
     }
   });
 
-  if (updated) {
-    await saveTimestampMap(env, map);
-  }
-
+  if (updated) await saveTimestampMap(env, map);
   return results;
 }
-
-/* ============================================================
-   HYBRID MATCHING ENGINE
-   ============================================================ */
 
 function matchesWatchlist(item, watchlist) {
   if (!Array.isArray(watchlist) || watchlist.length === 0) return false;
@@ -434,7 +456,6 @@ function matchesWatchlist(item, watchlist) {
   const itemScripRaw = String(item.scrip || "");
   const itemScripMatch = itemScripRaw.match(/\b(\d{6})\b/);
   const itemScrip = itemScripMatch ? itemScripMatch[1] : itemScripRaw.trim();
-
   const itemCompany = String(item.company || "").toLowerCase().trim();
 
   return watchlist.some(watch => {
@@ -442,23 +463,14 @@ function matchesWatchlist(item, watchlist) {
     const watchScripMatch = watchScripRaw.match(/\b(\d{6})\b/);
     const watchScrip = watchScripMatch ? watchScripMatch[1] : watchScripRaw.trim();
 
-    if (watchScrip && itemScrip && watchScrip === itemScrip) {
-      return true;
-    }
+    if (watchScrip && itemScrip && watchScrip === itemScrip) return true;
 
     const watchNameRaw = String(watch.name || "");
     const watchNameScripMatch = watchNameRaw.match(/\b(\d{6})\b/);
-    if (watchNameScripMatch && itemScrip && watchNameScripMatch[1] === itemScrip) {
-      return true;
-    }
+    if (watchNameScripMatch && itemScrip && watchNameScripMatch[1] === itemScrip) return true;
 
     const watchName = watchNameRaw.toLowerCase().trim();
-
-    if (watchName && watchName.length >= 3 && itemCompany) {
-      if (itemCompany.includes(watchName)) {
-        return true;
-      }
-    }
+    if (watchName && watchName.length >= 3 && itemCompany && itemCompany.includes(watchName)) return true;
 
     return false;
   });
@@ -493,26 +505,57 @@ async function monitorFeeds(env) {
   let newAlertCount = 0;
 
   for (const item of newItems) {
-    if (matchesWatchlist(item, watchlist)) {
-      if (!alerts.some(a => a.id === item.id)) {
+    const isWhitelisted = matchesWatchlist(item, watchlist);
+    const hasPdf = item.link && item.link.toLowerCase().includes(".pdf");
+    
+    // Evaluate if text indicates actual financial result vs irrelevant filing
+    const fullText = `${item.title || ""} ${item.description || ""}`.toLowerCase();
+    
+    const isFinancialTableKeywords = 
+      fullText.includes("financial results") || 
+      fullText.includes("financial result") || 
+      fullText.includes("quarterly result") || 
+      fullText.includes("audited results") || 
+      fullText.includes("unaudited results");
 
-        // Send Telegram notification if enabled
+    const isNonResultNoiseKeywords = 
+      fullText.includes("newspaper") || 
+      fullText.includes("publication") || 
+      fullText.includes("investor presentation") || 
+      fullText.includes("press release") || 
+      fullText.includes("earning call") || 
+      fullText.includes("audio recording");
+
+    const isActualFinancialTable = item.isFinancialResult && isFinancialTableKeywords && !isNonResultNoiseKeywords;
+
+    // Trigger on any market-wide result PDF OR any whitelisted company announcement
+    if (isActualFinancialTable || isWhitelisted) {
+      if (!alerts.some(a => a.id === item.id)) {
+        
+        let aiSummary = null;
+        
+        if (isActualFinancialTable && hasPdf) {
+          aiSummary = await analyzeFinancialPdf(item.link, env);
+        }
+
+        // Send Telegram alert
         if (settings.telegram !== false) {
           await sendTelegramAlert(
-            `${item.company || "Whitelisted Scrip"} (${item.scrip || ""})`,
-            item.title || "New Announcement",
+            `${item.company || "BSE Announcement"} (${item.scrip || ""})`,
+            item.title || "New Filing",
             item.scrip,
             item.link,
             item.fetchedAt,
+            aiSummary,
             env
           );
         }
 
-        // Send ntfy notification if enabled
+        // Send ntfy alert
         if (settings.ntfy !== false) {
           await sendNtfyAlert(
-            `${item.company || "Whitelisted Scrip"} (${item.scrip || ""})`,
-            item.title || "New Announcement",
+            `${item.company || "BSE Announcement"} (${item.scrip || ""})`,
+            item.title || "New Filing",
             item.scrip,
             item.link,
             item.fetchedAt,
@@ -522,6 +565,7 @@ async function monitorFeeds(env) {
 
         alerts.unshift({
           ...item,
+          aiSummary,
           alert: true,
           alertCreatedAt: new Date().toISOString(),
         });
@@ -547,7 +591,7 @@ export default {
     if (request.method === "OPTIONS") return new Response(null, { headers: CORS_HEADERS });
 
     try {
-      if (url.pathname === "/") return json({ status: "running", app: "BSE RSS Reader" });
+      if (url.pathname === "/") return json({ status: "running", app: "BSE Gemini Result Analyzer" });
 
       if (url.pathname === "/bse-announcements") {
         const fetchedAt = new Date().toISOString();
@@ -578,9 +622,7 @@ export default {
       }
 
       if (url.pathname === "/notification-settings") {
-        if (request.method === "GET") {
-          return json({ ok: true, settings: await getNotificationSettings(env) });
-        }
+        if (request.method === "GET") return json({ ok: true, settings: await getNotificationSettings(env) });
         if (request.method === "POST") {
           const body = await request.json();
           await setNotificationSettings(env, body);
@@ -604,6 +646,11 @@ export default {
   },
 
   async scheduled(event, env, ctx) {
-    ctx.waitUntil(monitorFeeds(env));
+    ctx.waitUntil((async () => {
+      for (let i = 0; i < 6; i++) {
+        await monitorFeeds(env);
+        if (i < 5) await new Promise(r => setTimeout(r, 10000));
+      }
+    })());
   },
 };
