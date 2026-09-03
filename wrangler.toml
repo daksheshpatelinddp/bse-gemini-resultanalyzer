@@ -1,0 +1,12 @@
+name = "bse-gemini-resultanalyzer"
+main = "worker.js"
+compatibility_date = "2024-01-01"
+
+# Cron trigger: Runs every 1 minute
+[triggers]
+crons = ["* * * * *"]
+
+# New KV Namespace Binding
+[[kv_namespaces]]
+binding = "BSE_GEMINI_DATA"
+id = "6c86cb7981334c8ba2b1ed48d73e3d2a"
